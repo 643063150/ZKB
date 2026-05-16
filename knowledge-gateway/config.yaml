@@ -1,0 +1,4 @@
+server_port: "8080"
+python_base_url: "http://localhost:8000"
+qdrant_url: "http://localhost:6333"
+qdrant_collection: "knowledge_items"

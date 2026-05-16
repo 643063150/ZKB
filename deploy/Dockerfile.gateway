@@ -1,0 +1,25 @@
+# ---- Build stage ----
+FROM golang:1.26-alpine AS builder
+
+WORKDIR /src
+
+COPY knowledge-gateway/go.* ./
+RUN go mod download
+
+COPY knowledge-gateway/ .
+
+RUN CGO_ENABLED=0 go build -o /knowledge-gateway .
+
+# ---- Run stage ----
+FROM alpine:latest
+
+RUN apk add --no-cache ca-certificates tzdata
+
+WORKDIR /app
+
+COPY --from=builder /knowledge-gateway .
+COPY knowledge-gateway/config.yaml .
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "exec ./knowledge-gateway"]

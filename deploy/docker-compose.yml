@@ -1,0 +1,117 @@
+# =============================================================================
+# ZKB 一键部署 — Docker Compose
+#
+# 用法:
+#   cp .env.example .env && vim .env   # 配置环境变量
+#   docker compose up -d               # 启动全部服务
+#   docker compose logs -f <service>   # 查看日志
+#   docker compose down                # 停止全部服务
+# =============================================================================
+
+services:
+
+  # ------------------------------------------------------------------
+  # 1. Qdrant — 向量数据库
+  # ------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: zkb-qdrant
+    restart: unless-stopped
+    ports:
+      - "${QD_PORT:-6333}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zkb-net
+
+  # ------------------------------------------------------------------
+  # 2. RAG Service — Python FastAPI 知识处理
+  # ------------------------------------------------------------------
+  rag:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.rag
+    image: zkb-rag:latest
+    container_name: zkb-rag
+    restart: unless-stopped
+    ports:
+      - "${RAG_PORT:-8000}:8000"
+    environment:
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-knowledge_items}
+      - LLM_MODEL=${LLM_MODEL:-LongCat-Flash-Chat}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.longcat.chat/openai/v1}
+      - LLM_API_KEY=${LLM_API_KEY}
+      - EMBED_MODEL=${EMBED_MODEL:-gemini-embedding-001}
+      - EMBED_DIM=${EMBED_DIM:-3072}
+      - EMBED_BASE_URL=${EMBED_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai/}
+      - EMBED_API_KEY=${EMBED_API_KEY}
+      - EMBED_MODEL_FALLBACK=${EMBED_MODEL_FALLBACK:-}
+      - EMBED_BASE_URL_FALLBACK=${EMBED_BASE_URL_FALLBACK:-}
+      - EMBED_API_KEY_FALLBACK=${EMBED_API_KEY_FALLBACK:-}
+      - CHUNK_SIZE=${CHUNK_SIZE:-1024}
+      - CHUNK_OVERLAP=${CHUNK_OVERLAP:-128}
+      - RAG_PORT=${RAG_PORT:-8000}
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - zkb-net
+
+  # ------------------------------------------------------------------
+  # 3. Knowledge Gateway — Go/Gin API 网关
+  # ------------------------------------------------------------------
+  gateway:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.gateway
+    image: zkb-gateway:latest
+    container_name: zkb-gateway
+    restart: unless-stopped
+    ports:
+      - "${GW_PORT:-8080}:8080"
+    environment:
+      - SERVER_PORT=${GW_PORT:-8080}
+      - PYTHON_BASE_URL=http://rag:8000
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-knowledge_items}
+    depends_on:
+      rag:
+        condition: service_healthy
+    networks:
+      - zkb-net
+
+  # ------------------------------------------------------------------
+  # 4. UI — React 前端 + Nginx
+  # ------------------------------------------------------------------
+  ui:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.ui
+    image: zkb-ui:latest
+    container_name: zkb-ui
+    restart: unless-stopped
+    ports:
+      - "${UI_PORT:-80}:80"
+    depends_on:
+      - gateway
+    networks:
+      - zkb-net
+
+volumes:
+  qdrant_data:
+    name: zkb_qdrant_data
+
+networks:
+  zkb-net:
+    name: zkb-net
