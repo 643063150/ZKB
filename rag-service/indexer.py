@@ -74,6 +74,24 @@ def _github_to_raw(url: str) -> str:
     )
 
 
+# ── HTML / Javadoc detection ──────────────────────────────────────────────────
+
+_HTML_TAG_RE = re.compile(r"<[a-zA-Z][^>]*>")
+_CODE_LINE_RE = re.compile(
+    r"^s*(public|private|protected|class|interface|enum|import|package|"
+    r"return|if|for|while|try|catch|throw|new|final|static|void|int|long|"
+    r"String|boolean)",
+    re.MULTILINE,
+)
+
+
+def _is_html_javadoc(text: str) -> bool:
+    """Detect whether a text chunk is Javadoc HTML rather than real source code."""
+    html_tags = len(_HTML_TAG_RE.findall(text))
+    code_lines = len(_CODE_LINE_RE.findall(text))
+    return html_tags > 10 and html_tags > code_lines * 2
+
+
 class Indexer:
     def __init__(self, classifier: MetadataClassifier) -> None:
         self.classifier = classifier
@@ -161,7 +179,14 @@ class Indexer:
             yield _sse("error", 0, "文档分块后为空")
             return
 
-        yield _sse("chunking", 40, f"分块完成，共 {len(nodes)} 个 chunk")
+        # Filter out Javadoc HTML chunks
+        original_count = len(nodes)
+        nodes = [n for n in nodes if not _is_html_javadoc(n.text)]
+        skipped = original_count - len(nodes)
+        if skipped > 0:
+            yield _sse("chunking", 38, f"过滤了 {skipped} 个 Javadoc HTML chunk，剩余 {len(nodes)} 个")
+
+        yield _sse("chunking", 40, f"分块完成，共 {len(nodes)} 个 chunk（原 {original_count}，过滤 {skipped}）")
 
         # Step 3: classifying
         yield _sse("classifying", 45, "LLM 正在分类...")
@@ -237,7 +262,13 @@ class Indexer:
         nodes = self.splitter.get_nodes_from_documents([doc])
 
         if not nodes:
-            return {"indexed_count": 0, "chunk_count": 0}
+            return {"indexed_count": 0, "chunk_count": 0, "batch_id": batch_id}
+
+        # Filter out Javadoc HTML chunks
+        nodes = [n for n in nodes if not _is_html_javadoc(n.text)]
+
+        if not nodes:
+            return {"indexed_count": 0, "chunk_count": 0, "batch_id": batch_id}
 
         base_meta = await self.classifier.classify(raw_text)
         base_meta.setdefault("source", source)
@@ -343,20 +374,29 @@ class Indexer:
         except Exception as e:
             yield _sse("error", 0, str(e))
 
-    # Patterns to exclude from repo imports (tests, docs, build artifacts)
+    # Patterns to exclude from repo imports (tests, docs, build artifacts, Javadoc HTML)
     _GITINGEST_EXCLUDE = [
-        "**/test/**",
-        "**/androidTest/**",
-        "**/tests/**",
-        "CHANGELOG*",
-        "README*",
-        "*.md",
-        "*.txt",
-        "**/build/**",
-        "**/node_modules/**",
-        "**/.git/**",
-        "**/vendor/**",
-        "**/dist/**",
+        # Tests
+        "**/test/**", "**/androidTest/**", "**/tests/**", "**/testFixtures/**",
+        # Docs & markdown
+        "CHANGELOG*", "README*", "*.md", "*.txt",
+        # Build artifacts
+        "**/build/**", "**/node_modules/**", "**/.git/**",
+        "**/vendor/**", "**/dist/**", "**/out/**", "**/target/**",
+        # Javadoc / HTML (core fix)
+        "**/*.html", "**/*.htm",
+        "**/javadoc/**", "**/docs/**", "**/apidoc/**", "**/generated-docs/**",
+        # Build system
+        "**/*.gradle*", "**/gradle/**", "**/gradlew*", "**/pom.xml",
+        # IDE / CI config
+        "**/.github/**", "**/.idea/**", "**/.vscode/**",
+        # Android resources (non-code)
+        "**/res/**", "**/assets/**", "**/META-INF/**",
+        # Config files
+        "**/*.properties", "**/*.xml", "**/*.yml", "**/*.yaml",
+        "**/Makefile", "**/CMakeLists.txt",
+        # Misc noise
+        "**/*.log", "**/*.lock", "**/.DS_Store", "Thumbs.db",
     ]
 
     @staticmethod
